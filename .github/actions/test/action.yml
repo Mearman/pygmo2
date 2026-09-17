@@ -1,0 +1,38 @@
+name: Test
+description: "Builds pagmo2 (from Nexsys-Analytics's own fork, not upstream esa/pagmo2) then pygmo2 against it via conda-provisioned toolchain and CMake, and runs the pygmo test suite. Extracted so this repo's own CI and mono's synced copy of this repo can call the identical steps locally -- see the \"Sharing CI with the monorepo\" pattern already shipped for the infrastructure repo. This is a new Linux x86_64 quality gate, adapted from tools/circleci_bionic_conda_pagmo_head_310.sh (not currently wired into GitHub Actions at all -- main.yml only runs the manylinux/macOS/Windows/docs jobs), corrected to build against this org's own pagmo2 fork rather than the original script's esa/pagmo2 clone, since that fork is the pagmo2 this repo is actually meant to pair with. Deliberately scoped to the quality gate only, not the manylinux wheel-build/PyPI-publish/docs-deploy pipeline in main.yml, which stays upstream-shaped."
+
+inputs:
+  working-directory:
+    description: Directory containing the pygmo2 CMake project to build and test
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: install conda toolchain, pagmo2/pygmo2 build and test dependencies
+      shell: bash
+      run: |
+        wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+        bash miniconda.sh -b -p "$HOME/miniconda"
+        echo "$HOME/miniconda/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/miniconda/bin:$PATH"
+        conda create -y -q -p "$HOME/local" c-compiler cxx-compiler cmake eigen nlopt ipopt boost-cpp tbb tbb-devel python=3.12 numpy cloudpickle networkx numba pybind11 scipy
+        echo "PYGMO2_CONDA_PREFIX=$HOME/local" >> "$GITHUB_ENV"
+    - name: build and install Nexsys-Analytics's pagmo2 fork
+      shell: bash
+      run: |
+        source "$HOME/miniconda/bin/activate" "$PYGMO2_CONDA_PREFIX"
+        git clone --depth 1 https://github.com/Nexsys-Analytics/pagmo2.git "$RUNNER_TEMP/pagmo2"
+        mkdir -p "$RUNNER_TEMP/pagmo2/build" && cd "$RUNNER_TEMP/pagmo2/build"
+        cmake ../ -DCMAKE_BUILD_TYPE=Debug -DBoost_NO_BOOST_CMAKE=ON -DPAGMO_WITH_EIGEN3=ON -DPAGMO_WITH_IPOPT=ON -DPAGMO_WITH_NLOPT=ON -DCMAKE_PREFIX_PATH="$PYGMO2_CONDA_PREFIX" -DCMAKE_INSTALL_PREFIX="$PYGMO2_CONDA_PREFIX" -DPAGMO_ENABLE_IPO=ON -DPAGMO_INSTALL_LIBDIR=lib
+        make -j4 install VERBOSE=1
+    - name: build pygmo2 and run the test suite
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        source "$HOME/miniconda/bin/activate" "$PYGMO2_CONDA_PREFIX"
+        mkdir -p build && cd build
+        cmake ../ -DCMAKE_BUILD_TYPE=Debug -DBoost_NO_BOOST_CMAKE=ON -DCMAKE_PREFIX_PATH="$PYGMO2_CONDA_PREFIX" -DCMAKE_INSTALL_PREFIX="$PYGMO2_CONDA_PREFIX" -DPYGMO_ENABLE_IPO=ON
+        make -j2 install VERBOSE=1
+        python -c "import pygmo; pygmo.test.run_test_suite(1); pygmo.mp_island.shutdown_pool(); pygmo.mp_bfe.shutdown_pool()"
